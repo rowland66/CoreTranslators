@@ -17,6 +17,7 @@ import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -26,6 +27,7 @@ import java.util.stream.Stream;
  */
 public class FileSystemServer extends JinixKernelUnicastRemoteObject implements FileNameSpace {
 
+    static Logger logger = Logger.getLogger("jinix.nativefilesystem");
     private static FileSystemServer server;
     private static Thread mainThread;
 

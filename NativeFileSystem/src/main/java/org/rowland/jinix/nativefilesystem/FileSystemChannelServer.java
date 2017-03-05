@@ -28,7 +28,7 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject impl
             this.openOptions = options;
             fc = java.nio.channels.FileChannel.open(path, options);
             this.openCount = 1;
-            System.out.println("Opening FSCS: " + this.toString());
+            FileSystemServer.logger.fine("Opening FSCS: " + this.toString());
         } catch (FileAlreadyExistsException | NoSuchFileException e) {
             unexport();
             throw e;
@@ -127,10 +127,10 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject impl
             if (openCount > 0) {
                 openCount--;
                 if (openCount == 0) {
-                    System.out.println("Closing FSCS: " + this.toString());
+                    FileSystemServer.logger.fine("Closing FSCS: " + this.toString());
                     fc.close();
                     if (!unexport()) {
-                        System.out.println("FSCS unexport failed: "+this.toString());
+                        FileSystemServer.logger.severe("FSCS unexport failed: "+this.toString());
                     }
                 }
             }
@@ -154,7 +154,7 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject impl
 
     @Override
     public synchronized void duplicate() throws RemoteException {
-        System.out.println("Duplicate: "+toString());
+        FileSystemServer.logger.fine("Duplicate: "+toString());
         openCount++;
     }
 
