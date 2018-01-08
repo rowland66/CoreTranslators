@@ -15,7 +15,7 @@ import java.rmi.server.UnicastRemoteObject;
 /**
  * Created by rsmith on 12/15/2016.
  */
-public class PipedInputStreamFileChannelServer extends JinixKernelUnicastRemoteObject implements FileChannel {
+public class PipedInputStreamFileChannelServer extends JinixKernelUnicastRemoteObject implements RemoteFileAccessor {
 
     private PipedInputStream is;
     private int openCount;
@@ -27,7 +27,7 @@ public class PipedInputStreamFileChannelServer extends JinixKernelUnicastRemoteO
     }
 
     @Override
-    public byte[] read(int len) throws RemoteException {
+    public byte[] read(int processGroupId, int len) throws RemoteException {
         try {
             byte[] b = new byte[len];
             int r = is.read(b);
@@ -44,7 +44,7 @@ public class PipedInputStreamFileChannelServer extends JinixKernelUnicastRemoteO
     }
 
     @Override
-    public int write(byte[] bytes) throws RemoteException {
+    public int write(int processGroupId, byte[] bytes) throws RemoteException {
         return 0;
     }
 
@@ -104,5 +104,9 @@ public class PipedInputStreamFileChannelServer extends JinixKernelUnicastRemoteO
     @Override
     public void duplicate() throws RemoteException {
         openCount++;
+    }
+
+    @Override
+    public void force(boolean b) throws RemoteException {
     }
 }

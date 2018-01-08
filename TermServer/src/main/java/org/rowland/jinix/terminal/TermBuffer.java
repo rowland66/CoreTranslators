@@ -10,12 +10,12 @@ public class TermBuffer {
     mode_value mode;
     int position;
     int limit;
-    String name;
+    Terminal parentTerminal;
     private volatile boolean suspended = false;
     private volatile boolean requestSuspend = false;
 
-    TermBuffer(String name, int capacity) {
-        this.name = name;
+    TermBuffer(Terminal parent, int capacity) {
+        this.parentTerminal = parent;
         this.buffer = new byte[capacity];
         this.mode = mode_value.write;
         this.position = 0;
@@ -35,7 +35,7 @@ public class TermBuffer {
 
     synchronized int put(byte b) {
 
-        int bytesAvailable = buffer.length-position;
+        int bytesAvailable = buffer.length - position;
 
         while (mode == mode_value.read || bytesAvailable == 0) {
             try {
@@ -43,8 +43,17 @@ public class TermBuffer {
             } catch (InterruptedException e) {
                 return 0;
             }
-            bytesAvailable = buffer.length-position;
+            bytesAvailable = buffer.length - position;
         }
+
+        if (parentTerminal.activeWriterThreads.get(Thread.currentThread()) != null) {
+            Integer processGroupId = parentTerminal.activeWriterThreads.get(Thread.currentThread());
+            if (processGroupId != parentTerminal.foregroundProcessGroupId) {
+                throw new TerminalBlockedOperationException();
+            }
+        }
+
+        bytesAvailable = buffer.length-position;
 
         if (bytesAvailable > 0) {
             buffer[position++] = b;
@@ -68,6 +77,13 @@ public class TermBuffer {
                 this.wait();
             } catch (InterruptedException e) {
                 return 0;
+            }
+
+            if (parentTerminal.activeWriterThreads.get(Thread.currentThread()) != null) {
+                Integer processGroupId = parentTerminal.activeWriterThreads.get(Thread.currentThread());
+                if (processGroupId != parentTerminal.foregroundProcessGroupId) {
+                    throw new TerminalBlockedOperationException();
+                }
             }
         }
 
@@ -98,11 +114,22 @@ public class TermBuffer {
     }
 
     synchronized int get() {
+
         while (mode == mode_value.write || suspended) {
             try {
                 this.wait();
             } catch (InterruptedException e) {
-                return 0;
+                return 0; // This should never happen
+            }
+        }
+
+        // If this thread is not in the process group that is the foreground, so it should not receive input. get() is
+        // call by both master and the slave. Only the slave will populate the map, if the thread is not in the map, it
+        // means that the master is calling.
+        if (parentTerminal.activeReaderThreads.get(Thread.currentThread()) != null) {
+            Integer processGroupId = parentTerminal.activeReaderThreads.get(Thread.currentThread());
+            if (processGroupId != parentTerminal.foregroundProcessGroupId) {
+                throw new TerminalBlockedOperationException();
             }
         }
 
@@ -126,6 +153,13 @@ public class TermBuffer {
                 this.wait();
             } catch (InterruptedException e) {
                 return 0;
+            }
+
+            if (parentTerminal.activeReaderThreads.get(Thread.currentThread()) != null) {
+                Integer processGroupId = parentTerminal.activeReaderThreads.get(Thread.currentThread());
+                if (processGroupId != parentTerminal.foregroundProcessGroupId) {
+                    throw new TerminalBlockedOperationException();
+                }
             }
         }
 
@@ -165,13 +199,13 @@ public class TermBuffer {
             mode = mode_value.write;
             requestSuspend = false;
             suspended = true;
-            notify();
+            notifyAll();
             return;
         }
 
         this.position = 0;
 
-        this.notify();
+        this.notifyAll();
     }
 
     synchronized int available() {
@@ -206,6 +240,7 @@ public class TermBuffer {
 
     public synchronized void resumeFlow() {
         if (!suspended) {
+            requestSuspend = false;
             return;
         }
 

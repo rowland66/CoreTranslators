@@ -1,6 +1,7 @@
 package org.rowland.jinix.nativefilesystem;
 
 import org.rowland.jinix.JinixKernelUnicastRemoteObject;
+import org.rowland.jinix.RootFileSystem;
 import org.rowland.jinix.io.JinixFileDescriptor;
 import org.rowland.jinix.lang.JinixRuntime;
 import org.rowland.jinix.lang.ProcessSignalHandler;
@@ -8,15 +9,15 @@ import org.rowland.jinix.naming.*;
 import org.rowland.jinix.proc.ProcessManager;
 
 import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributeView;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.rmi.RemoteException;
-import java.util.ArrayList;
-import java.util.LinkedList;
-import java.util.List;
+import java.util.*;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -25,17 +26,39 @@ import java.util.stream.Stream;
  * Server for FileSystem files. This server overlays an existing file system providing access
  * to its files through the Jinix FileNameSpace interface.
  */
-public class FileSystemServer extends JinixKernelUnicastRemoteObject implements FileNameSpace {
+public class FileSystemServer extends JinixKernelUnicastRemoteObject implements FileNameSpace, RootFileSystem {
 
     static Logger logger = Logger.getLogger("jinix.nativefilesystem");
     private static FileSystemServer server;
     private static Thread mainThread;
 
     private Path f;
+    private NameSpace rootNameSpace;
+
+    private Map<Integer, List<FileAccessorStatistics>> openFileMap = Collections.synchronizedMap(
+            new HashMap<Integer, List<FileAccessorStatistics>>());
 
     FileSystemServer(Path file) throws RemoteException {
         super();
         this.f = file;
+    }
+
+    @Override
+    public void setRootNameSpace(NameSpace nameSpace) {
+        this.rootNameSpace = nameSpace;
+    }
+
+    @Override
+    public URI getURI() throws RemoteException {
+        try {
+            String path = this.f.toAbsolutePath().toString().replace('\\', '/');
+            if (!path.startsWith("/")) {
+                path = path.substring(path.indexOf('/'),path.length());
+            }
+            return new URI("file", null, path, null);
+        } catch (URISyntaxException e) {
+            throw new RemoteException("Unexpected failure creating FileNameSpace URI", e);
+        }
     }
 
     @Override
@@ -178,9 +201,16 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
     }
 
     @Override
-    public void move(String name, String pathNameTo, CopyOption... options) throws NoSuchFileException, FileAlreadyExistsException, RemoteException {
+    public void copy(String name, String pathNameTo, CopyOption... options)
+            throws NoSuchFileException, FileAlreadyExistsException, UnsupportedOperationException, RemoteException {
+
         if (!pathNameTo.startsWith("/")) {
-            throw new IllegalArgumentException("Move pathNameTo must begin with slash: "+pathNameTo);
+            throw new IllegalArgumentException("Copy pathNameTo must begin with slash: "+pathNameTo);
+        }
+
+        LookupResult result = rootNameSpace.lookup(pathNameTo);
+        if (!((FileNameSpace) result.remote).getURI().equals(getURI())) {
+            throw new UnsupportedOperationException();
         }
 
         try {
@@ -197,7 +227,43 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
                 dest = f.resolve(pathNameTo);
             }
 
-            //TODO: If the targetObj in in another file system, this move needs to fail.
+            Files.copy(resolveAbsolutePath(name), dest, options);
+        } catch (InvalidPathException e) {
+            throw new NoSuchFileException(name);
+        } catch (NoSuchFileException | FileAlreadyExistsException e) {
+            throw e;
+        } catch (IOException e) {
+            throw new RemoteException("IOException copying file "+name+" to "+pathNameTo);
+        }
+    }
+
+    @Override
+    public void move(String name, String pathNameTo, CopyOption... options)
+            throws NoSuchFileException, FileAlreadyExistsException, UnsupportedOperationException, RemoteException {
+
+        if (!pathNameTo.startsWith("/")) {
+            throw new IllegalArgumentException("Move pathNameTo must begin with slash: "+pathNameTo);
+        }
+
+        LookupResult result = rootNameSpace.lookup(pathNameTo);
+        if (!((FileNameSpace) result.remote).getURI().equals(getURI())) {
+            throw new UnsupportedOperationException();
+        }
+
+        try {
+            if (exists(pathNameTo) &&
+                    getFileAttributes(name).type == DirectoryFileData.FileType.DIRECTORY) {
+                throw new FileAlreadyExistsException(pathNameTo);
+            }
+
+            Path dest;
+            if (pathNameTo.equals("/")) {
+                dest = Paths.get(".");
+            } else {
+                pathNameTo = pathNameTo.substring(1);
+                dest = f.resolve(pathNameTo);
+            }
+
             Files.move(resolveAbsolutePath(name), dest, options);
         } catch (InvalidPathException e) {
             throw new NoSuchFileException(name);
@@ -209,10 +275,22 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
     }
 
     @Override
-    public org.rowland.jinix.naming.FileChannel getFileChannel(String name, OpenOption... options)
+    public RemoteFileAccessor getRemoteFileAccessor(int pid, String name, Set<? extends OpenOption> options)
             throws FileAlreadyExistsException, NoSuchFileException, RemoteException {
         try {
-            return new FileSystemChannelServer(resolveAbsolutePath(name), options);
+            FileSystemChannelServer s = new FileSystemChannelServer(this, pid, name, resolveAbsolutePath(name), options);
+
+            // Only the Jinix Kernel passes pid -1 when it gets the init
+            if (pid == -1) {
+                return s;
+            }
+            List<FileAccessorStatistics> l = openFileMap.get(pid);
+            if (l == null) {
+                l = new LinkedList<FileAccessorStatistics>();
+                openFileMap.put(pid, l);
+            }
+            l.add(s);
+            return s;
         } catch (InvalidPathException e) {
             throw new NoSuchFileException(name);
         }
@@ -221,6 +299,16 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
     @Override
     public Object getKey(String name) throws RemoteException {
         return name;
+    }
+
+    @Override
+    public List<FileAccessorStatistics> getOpenFiles(int pid) throws RemoteException {
+        return this.openFileMap.get(pid);
+    }
+
+    void removeFileSystemChannelServer(int pid, FileSystemChannelServer s) {
+        List<FileAccessorStatistics> l = openFileMap.get(pid);
+        l.remove(s);
     }
 
     /**
@@ -250,7 +338,7 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
 
         String rootPath;
         if (args == null || args.length == 0 || args[0].isEmpty()) {
-            System.err.println("FileSystemServer translator requires at least 1 argument");
+            System.err.println("FileSystemServer translator requires rootPath argument");
             return;
         } else {
             rootPath = args[0];
@@ -268,10 +356,12 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
 
         JinixRuntime.getRuntime().registerSignalHandler(new ProcessSignalHandler() {
             @Override
-            public void handleSignal(ProcessManager.Signal signal) {
+            public boolean handleSignal(ProcessManager.Signal signal) {
                 if (signal == ProcessManager.Signal.TERMINATE) {
                     mainThread.interrupt();
+                    return true;
                 }
+                return false;
             }
         });
 

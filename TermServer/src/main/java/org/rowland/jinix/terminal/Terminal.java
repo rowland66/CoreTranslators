@@ -1,9 +1,11 @@
 package org.rowland.jinix.terminal;
 
-import org.rowland.jinix.naming.FileChannel;
+import org.rowland.jinix.naming.RemoteFileAccessor;
+import org.rowland.jinix.proc.ProcessManager;
 
 import java.rmi.RemoteException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -17,8 +19,14 @@ import java.util.Map;
  */
 public class Terminal {
 
-    private short id;
-    private int linkedProcess;
+    TermServerServer server;
+    short id;
+    int linkedProcess;
+    int sessionLeaderProcessGroup;
+    // Some synchronization is needed here, but it is hard to do.
+    volatile int foregroundProcessGroupId;
+    Map<Thread, Integer> activeReaderThreads;
+    Map<Thread, Integer> activeWriterThreads;
     private TermBuffer inputTermBuffer;
     private TermBuffer outputTermBuffer;
     private Map<PtyMode, Integer> modes;
@@ -27,25 +35,47 @@ public class Terminal {
      * Constructor used by the TermServerServer to create a new Terminal
      *
      * @param terminalId the ID that identifies the terminal
-     * @param rawPtyModes a map of PtyModes
+     * @param overridePtyModes a map of PtyModes that will override the terminal defaults
      */
-    Terminal(short terminalId, Map<PtyMode, Integer> rawPtyModes) {
+    Terminal(TermServerServer termServer, short terminalId, Map<PtyMode, Integer> overridePtyModes) {
+        server = termServer;
         id = terminalId;
-        inputTermBuffer = new TermBuffer("I",1024); // output from the running process
-        outputTermBuffer = new TermBuffer("O",1024); // input for the running process
-        this.modes = rawPtyModes;
+        inputTermBuffer = new TermBuffer(this,1024); // output from the running process
+        outputTermBuffer = new TermBuffer(this,1024); // input for the running process
+        activeReaderThreads = new HashMap<>(16);
+        activeWriterThreads = new HashMap<>(16);
+        this.modes = overridePtyModes;
+        foregroundProcessGroupId = -1; // Always start with the foreground process group set to -1 to indicate that the terminal is suspended.
+        inputTermBuffer.suspendFlow();
 
         System.out.println("Terminal opened:"+id);
     }
-    FileChannel getMasterTerminalFileDescriptor() throws RemoteException {
-        return new TerminalFileChannel(id, "Master", outputTermBuffer, inputTermBuffer, modes);
+
+    /**
+     * Get the RemoteFileAccessor for the terminal master. The master is used by the terminal (ie ssh) to write typed
+     * characters to the shell, and to read output from the shell.
+     *
+     * @return
+     * @throws RemoteException
+     */
+    RemoteFileAccessor getMasterTerminalFileDescriptor() throws RemoteException {
+        return new TerminalFileChannel(this, "Master",
+                new LineDiscipline(this, inputTermBuffer, outputTermBuffer, modes));
     }
 
-    FileChannel getSlaveTerminalFileDescriptor() throws RemoteException {
-        return new TerminalFileChannel(id, "Slave", inputTermBuffer, outputTermBuffer, null);
+    /**
+     * Get the RemoteFileAccessor for the terminal slave. The slave is used by the shell (ie jsh) to write program output
+     * and read program input.
+     *
+     * @return
+     * @throws RemoteException
+     */
+    RemoteFileAccessor getSlaveTerminalFileDescriptor() throws RemoteException {
+        return new TerminalFileChannel(this, "Slave",
+                new LineDiscipline(this, outputTermBuffer, inputTermBuffer, null));
     }
 
-    public void close() {
+    void close() {
         System.out.println("Terminal closed:"+id);
         outputTermBuffer.reset();
     }
@@ -56,6 +86,88 @@ public class Terminal {
 
     int getLinkedProcess() {
         return linkedProcess;
+    }
+
+    int getForegroundProcessGroupId() {
+        return foregroundProcessGroupId;
+    }
+
+    /**
+     * Set the foreground process group. Also looks for any threads from the new foreground process in the active thread
+     * maps, and wakes them up so that they begin waiting for data. Synchronized to make sure that changes for the
+     * foreground process group and the active thread held happen atomically.
+     *
+     * @param foregroundProcessGroupId
+     */
+    void setForegroundProcessGroupId(int foregroundProcessGroupId) {
+        this.foregroundProcessGroupId = foregroundProcessGroupId;
+
+        if (foregroundProcessGroupId == -1) {
+            inputTermBuffer.suspendFlow();
+            return;
+        }
+
+        inputTermBuffer.resumeFlow();
+
+        for (Integer processGroupId : activeReaderThreads.values()) {
+            if (processGroupId == foregroundProcessGroupId) {
+                synchronized (processGroupId) {
+                    processGroupId.notify();
+                }
+            }
+        }
+
+        for (Integer processGroupId : activeWriterThreads.values()) {
+            if (processGroupId == foregroundProcessGroupId) {
+                synchronized (processGroupId) {
+                    processGroupId.notify();
+                }
+            }
+        }
+
+        // The shell is the first foreground process group set for a terminal. It is remembered as the session leader
+        // and will have special privileges.
+        if (sessionLeaderProcessGroup == 0) {
+            sessionLeaderProcessGroup = foregroundProcessGroupId;
+        }
+    }
+
+    short getId() {
+        return id;
+    }
+
+    void signalForegroundProcessGroup(ProcessManager.Signal signal) {
+        try {
+            server.processManager.sendSignalProcessGroup(foregroundProcessGroupId, signal);
+        } catch (RemoteException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    void signalProcessGroup(int processGroupId, ProcessManager.Signal signal) {
+        try {
+            server.processManager.sendSignalProcessGroup(processGroupId, signal);
+        } catch (RemoteException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    boolean isActiveReader(int pgid) {
+        for (Integer processGroupId : activeReaderThreads.values()) {
+            if (pgid == processGroupId) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    boolean isActiveWriter(int pgid) {
+        for (Integer processGroupId : activeWriterThreads.values()) {
+            if (pgid == processGroupId) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Map<PtyMode, Integer> convertRawTtyOptions(Map<Byte, Integer> inputMap) {

@@ -1,7 +1,9 @@
 package org.rowland.jinix.terminal;
 
 import org.rowland.jinix.JinixKernelUnicastRemoteObject;
+import org.rowland.jinix.lang.JinixRuntime;
 import org.rowland.jinix.naming.*;
+import org.rowland.jinix.proc.ProcessManager;
 
 import java.io.IOException;
 import java.nio.file.*;
@@ -9,46 +11,61 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.rmi.RemoteException;
 import java.rmi.server.RMISocketFactory;
 import java.rmi.server.UnicastRemoteObject;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 /**
  * Created by rsmith on 11/30/2016.
  */
-public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implements FileChannel {
+public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implements RemoteFileAccessor {
 
-    private short terminalId;
+    private Terminal parentTerminal;
     private String type;
     LineDiscipline lineDiscipline;
     private volatile int openCount;
 
-    TerminalFileChannel(short terminalId, String type, TermBuffer inputStream, TermBuffer outputStream, Map<PtyMode, Integer> modes) throws RemoteException {
+    TerminalFileChannel(Terminal terminal, String type, LineDiscipline lineDisipline) throws RemoteException {
         super();
-        this.terminalId = terminalId;
+        this.parentTerminal = terminal;
         this.type = type;
+        this.lineDiscipline = lineDisipline;
         openCount = 1;
-        if (modes != null) {
-            this.lineDiscipline = new LineDiscipline(outputStream, inputStream, modes);
-        } else {
-            this.lineDiscipline = new LineDiscipline(outputStream, inputStream, new HashMap<PtyMode,Integer>());
-        }
     }
 
     @Override
-    public byte[] read(int len) throws RemoteException {
+    public byte[] read(int processGroupId, int len) throws RemoteException {
 
         if (openCount == 0) throw new RemoteException("Illegal attempt to read from a closed TermBuferIS");
 
+        if (type.equals("Slave")) {
+            parentTerminal.activeReaderThreads.put(Thread.currentThread(), processGroupId);
+        }
         try {
             byte[] b = new byte[len];
             int i =0;
             do {
-                int s = lineDiscipline.read();
-                if (s == -1) {
-                    return null;
+                while(true) {
+                    try {
+                        int s = lineDiscipline.read();
+                        if (s == -1) {
+                            return null;
+                        }
+                        b[i++] = (byte) s;
+                        break;
+                    } catch (TerminalBlockedOperationException e) {
+                        Integer lockObject = parentTerminal.activeReaderThreads.get(Thread.currentThread());
+                        if (parentTerminal.foregroundProcessGroupId != -1) {
+                            parentTerminal.signalProcessGroup(lockObject.intValue(), ProcessManager.Signal.TERMINAL_INPUT);
+                        }
+                        synchronized (lockObject) {
+                            try {
+                                lockObject.wait();
+                            } catch (InterruptedException e1) {
+                                return null; // this should never happen
+                            }
+                        }
+                        continue;
+                    }
                 }
-                b[i++] = (byte) s;
             } while (lineDiscipline.available() > 0);
 
             if (i < len) {
@@ -59,21 +76,51 @@ public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implemen
             return b;
         } catch (IOException e) {
             throw new RemoteException("Internal error", e);
+        } finally {
+            if (type.equals("Slave")) {
+                parentTerminal.activeReaderThreads.remove(Thread.currentThread());
+            }
         }
     }
 
     @Override
-    public int write(byte[] bs) throws RemoteException {
+    public int write(int processGroupId, byte[] bs) throws RemoteException {
         if (openCount == 0) throw new RemoteException("Illegal attempt to write to a closed TermBuferOS");
+
+        if (type.equals("Slave")) {
+            parentTerminal.activeWriterThreads.put(Thread.currentThread(), processGroupId);
+        }
 
         try {
             for (byte b : bs) {
-                lineDiscipline.write(b);
+                while (true) {
+                    try {
+                        lineDiscipline.write(b);
+                        break;
+                    } catch (TerminalBlockedOperationException e) {
+                        Integer lockObject = parentTerminal.activeWriterThreads.get(Thread.currentThread());
+                        if (parentTerminal.foregroundProcessGroupId != -1) {
+                            parentTerminal.signalProcessGroup(lockObject.intValue(), ProcessManager.Signal.TERMINAL_OUTPUT);
+                        }
+                        synchronized (lockObject) {
+                            try {
+                                lockObject.wait();
+                            } catch (InterruptedException e1) {
+                                return 0; // this should never happen
+                            }
+                        }
+                        continue;
+                    }
+                }
             }
             lineDiscipline.flush();
             return bs.length;
         } catch (IOException e) {
             throw new RemoteException("Internal error", e);
+        } finally {
+            if (type.equals("Slave")) {
+                parentTerminal.activeWriterThreads.remove(Thread.currentThread());
+            }
         }
     }
 
@@ -110,10 +157,10 @@ public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implemen
     @Override
     public synchronized void close() throws RemoteException {
         if (openCount > 0) {
-            System.out.println("Closing TFCS("+terminalId+"): open count="+openCount+": "+type);
+            System.out.println("Closing TFCS("+parentTerminal.getId()+"): open count="+openCount+": "+type);
             openCount--;
             if (openCount == 0) {
-                System.out.println("Closing TFCS("+terminalId+"): "+type);
+                System.out.println("Closing TFCS("+parentTerminal.getId()+"): "+type);
                 unexport();
             }
         }
@@ -122,5 +169,10 @@ public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implemen
     @Override
     public synchronized void duplicate() throws RemoteException {
         openCount++;
+    }
+
+    @Override
+    public void force(boolean b) throws RemoteException {
+
     }
 }

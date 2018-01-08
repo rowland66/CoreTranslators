@@ -5,11 +5,12 @@ import org.rowland.jinix.io.JinixFile;
 import org.rowland.jinix.io.JinixFileDescriptor;
 import org.rowland.jinix.lang.JinixRuntime;
 import org.rowland.jinix.lang.ProcessSignalHandler;
-import org.rowland.jinix.naming.FileChannel;
+import org.rowland.jinix.naming.FileNameSpace;
 import org.rowland.jinix.naming.NameSpace;
+import org.rowland.jinix.naming.RemoteFileAccessor;
+import org.rowland.jinix.proc.EventData;
 import org.rowland.jinix.proc.EventNotificationHandler;
 import org.rowland.jinix.proc.ProcessManager;
-import org.rowland.jinix.proc.DeregisterEventData;
 
 import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
@@ -17,6 +18,7 @@ import java.rmi.registry.Registry;
 import java.rmi.server.RMISocketFactory;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -24,14 +26,16 @@ import java.util.Map;
  */
 class TermServerServer extends JinixKernelUnicastRemoteObject implements TermServer {
 
-    private static TermServerServer server;
+    static TermServerServer server;
     private static Thread mainThread;
 
-    Terminal[] term;
-    NameSpace rootNamespace;
+    private Terminal[] term;
+    private NameSpace rootNamespace;
     ProcessManager processManager;
 
-    TermServerServer() throws RemoteException {
+    Map<PtyMode, Integer> defaultModes = new HashMap<>();
+
+    private TermServerServer() throws RemoteException {
 
         super();
         rootNamespace = JinixRuntime.getRuntime().getRootNamespace();
@@ -54,6 +58,27 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
         }
 
         term = new Terminal[256];
+
+        processManager.registerGlobalEventNotificationHandler(ProcessManager.EventName.RESUME,
+                new ResumeEventNotificationHandler());
+
+
+        setupDefaultPtyModes();
+    }
+
+    private void setupDefaultPtyModes() {
+        defaultModes.put(PtyMode.VINTR, 0x03);
+        defaultModes.put(PtyMode.VQUIT, 0x1c);
+        defaultModes.put(PtyMode.VERASE, 0x7F);
+        defaultModes.put(PtyMode.VKILL, 0x15);
+        defaultModes.put(PtyMode.VEOF, 0x04);
+        defaultModes.put(PtyMode.VSTART, 0x11);
+        defaultModes.put(PtyMode.VSTOP, 0x13);
+        defaultModes.put(PtyMode.VSUSP, 0x1a);
+        defaultModes.put(PtyMode.VREPRINT, 0x12);
+        defaultModes.put(PtyMode.VWERASE, 0x17);
+        defaultModes.put(PtyMode.VLNEXT, 0x16);
+        defaultModes.put(PtyMode.VFLUSH, 0x0f);
     }
 
     @Override
@@ -65,7 +90,7 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
     public short createTerminal(Map<PtyMode, Integer> ttyOptions) throws RemoteException {
         for (short i = 0; i < 255; i++) {
             if(term[i]==null) {
-                term[i] = new Terminal(i, ttyOptions);
+                term[i] = new Terminal(server, i, ttyOptions);
                 return i;
             }
         }
@@ -78,19 +103,24 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
 
         if (term[termId] == null) throw new RuntimeException("TermServer: Attempt to link a process to an unallocated terminal");
         term[termId].setLinkedProcess(pid);
-
         processManager.registerEventNotificationHandler(pid, ProcessManager.EventName.DEREGISTER,
                 new DeRegisterEventNotificationHandler());
+
     }
 
     @Override
-    public FileChannel getTerminalMaster(short termId) throws RemoteException {
+    public RemoteFileAccessor getTerminalMaster(short termId) throws RemoteException {
         return term[termId].getMasterTerminalFileDescriptor();
     }
 
     @Override
-    public FileChannel getTerminalSlave(short termId) throws RemoteException {
+    public RemoteFileAccessor getTerminalSlave(short termId) throws RemoteException {
         return term[termId].getSlaveTerminalFileDescriptor();
+    }
+
+    @Override
+    public void setTerminalForegroundProcessGroup(short termId, int processGroupId) throws RemoteException {
+        term[termId].setForegroundProcessGroupId(processGroupId);
     }
 
     private void shutdown() {
@@ -114,15 +144,45 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
             if (!event.equals(ProcessManager.EventName.DEREGISTER)) {
                 return; // This should never happen as we have only registered for DEREGISTER events
             }
-            for(int i=0; i<term.length; i++) {
-                Terminal t = term[i];
-                if(t != null && t.getLinkedProcess() == ((DeregisterEventData) eventData).pid) {
-                    term[i].close();
-                    term[i] = null;
+
+            // Check if the process is a session leader and is assigned to a terminal
+            if (((EventData) eventData).pid == ((EventData) eventData).sessionId && ((EventData) eventData).terminalId != -1) {
+                Terminal t = term[((EventData) eventData).terminalId];
+                if (t != null) {
+                    t.close();
+                    term[((EventData) eventData).terminalId] = null;
                 }
             }
         }
     }
+
+    public class ResumeEventNotificationHandler extends UnicastRemoteObject implements EventNotificationHandler {
+
+        private ResumeEventNotificationHandler() throws RemoteException {
+            super(0, RMISocketFactory.getSocketFactory(), RMISocketFactory.getSocketFactory());
+        }
+
+        @Override
+        public void handleEventNotification(ProcessManager.EventName event, Object eventData) throws RemoteException {
+
+            if (!event.equals(ProcessManager.EventName.RESUME)) {
+                return; // This should never happen as we have only registered for RESUME events
+            }
+
+            Terminal t = term[((EventData) eventData).terminalId];
+            int pgid = ((EventData) eventData).pgid;
+
+            if (pgid != t.foregroundProcessGroupId && t.isActiveReader(pgid)) {
+                processManager.sendSignalProcessGroup(pgid, ProcessManager.Signal.TERMINAL_INPUT);
+            }
+
+            if (pgid != t.foregroundProcessGroupId && t.isActiveWriter(pgid)) {
+                processManager.sendSignalProcessGroup(pgid, ProcessManager.Signal.TERMINAL_OUTPUT);
+            }
+        }
+    }
+
+    // FileNameSpace implementation starts here
 
     public static void main(String[] args) {
 
@@ -144,10 +204,12 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
 
             JinixRuntime.getRuntime().registerSignalHandler(new ProcessSignalHandler() {
                 @Override
-                public void handleSignal(ProcessManager.Signal signal) {
+                public boolean handleSignal(ProcessManager.Signal signal) {
                     if (signal == ProcessManager.Signal.TERMINATE) {
                         mainThread.interrupt();
+                        return true;
                     }
+                    return false;
                 }
             });
 

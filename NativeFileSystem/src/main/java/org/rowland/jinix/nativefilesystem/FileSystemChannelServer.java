@@ -1,29 +1,43 @@
 package org.rowland.jinix.nativefilesystem;
 
 import org.rowland.jinix.JinixKernelUnicastRemoteObject;
-import org.rowland.jinix.naming.FileChannel;
+import org.rowland.jinix.naming.FileAccessorStatistics;
+import org.rowland.jinix.naming.RemoteFileAccessor;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.NonWritableChannelException;
 import java.nio.file.*;
 import java.rmi.Remote;
 import java.rmi.RemoteException;
 import java.rmi.server.ServerCloneException;
+import java.util.Set;
 
 /**
  * A FileChannel server that serves up files from an underlying file system
  */
-public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject implements FileChannel {
+public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
+        implements RemoteFileAccessor, FileAccessorStatistics {
 
-    private Path filePath;
-    private OpenOption[] openOptions;
+    private FileSystemServer server;
+    private int pid;
+    private String jinixPath; // the absolute pathname of the Jinix file
+    private Path filePath; // the absolute pathname of the file in the underlying OS
+    private Set<? extends OpenOption> openOptions;
     private java.nio.channels.FileChannel fc;
     private int openCount;
 
-    protected FileSystemChannelServer(Path path, OpenOption... options)
+    protected FileSystemChannelServer(FileSystemServer server,
+                                      int pid,
+                                      String fullPath,
+                                      Path path,
+                                      Set<? extends OpenOption> options)
             throws FileAlreadyExistsException, NoSuchFileException, RemoteException {
         super();
         try {
+            this.server = server;
+            this.pid = pid;
+            this.jinixPath = fullPath;
             this.filePath = path;
             this.openOptions = options;
             fc = java.nio.channels.FileChannel.open(path, options);
@@ -42,7 +56,7 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject impl
     }
 
     @Override
-    public byte[] read(int len) throws RemoteException {
+    public byte[] read(int pid, int len) throws RemoteException {
         try {
             byte[] b = new byte[len];
             int r = fc.read(ByteBuffer.wrap(b));
@@ -59,7 +73,7 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject impl
     }
 
     @Override
-    public int write(byte[] b) throws RemoteException {
+    public int write(int pid, byte[] b) throws NonWritableChannelException, RemoteException {
         try {
             return fc.write(ByteBuffer.wrap(b));
         } catch (IOException e) {
@@ -136,6 +150,10 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject impl
             }
         } catch (IOException e) {
             throw new RemoteException("Internal error", e);
+        } finally {
+            if (openCount == 0) {
+                server.removeFileSystemChannelServer(pid, this);
+            }
         }
     }
 
@@ -159,8 +177,22 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject impl
     }
 
     @Override
+    public void force(boolean metaData) throws RemoteException {
+        try {
+            fc.force(metaData);
+        } catch (IOException e) {
+            throw new RemoteException("Internal error", e);
+        }
+    }
+
+    @Override
     protected void finalize() throws Throwable {
         super.finalize();
         close();
+    }
+
+    @Override
+    public String getAbsolutePathName() throws RemoteException {
+        return jinixPath;
     }
 }

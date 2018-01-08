@@ -66,10 +66,12 @@ public class FifoServerServer extends JinixKernelUnicastRemoteObject implements 
 
         JinixRuntime.getRuntime().registerSignalHandler(new ProcessSignalHandler() {
             @Override
-            public void handleSignal(ProcessManager.Signal signal) {
+            public boolean handleSignal(ProcessManager.Signal signal) {
                 if (signal == ProcessManager.Signal.TERMINATE) {
                     mainThread.interrupt();
+                    return true;
                 }
+                return false;
             }
         });
 

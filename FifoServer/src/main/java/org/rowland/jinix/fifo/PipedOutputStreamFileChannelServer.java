@@ -15,7 +15,7 @@ import java.rmi.server.UnicastRemoteObject;
 /**
  * Created by rsmith on 12/15/2016.
  */
-public class PipedOutputStreamFileChannelServer extends JinixKernelUnicastRemoteObject implements FileChannel {
+public class PipedOutputStreamFileChannelServer extends JinixKernelUnicastRemoteObject implements RemoteFileAccessor {
 
     private PipedOutputStream os;
     private int openCount;
@@ -24,7 +24,6 @@ public class PipedOutputStreamFileChannelServer extends JinixKernelUnicastRemote
         super();
         openCount = 1;
         os = pipedOutputStream;
-        System.out.println("Opening POSFCS: " + this.toString());
     }
 
     @Override
@@ -33,12 +32,12 @@ public class PipedOutputStreamFileChannelServer extends JinixKernelUnicastRemote
     }
 
     @Override
-    public byte[] read(int i) throws RemoteException {
+    public byte[] read(int processGroupId, int i) throws RemoteException {
         return new byte[0];
     }
 
     @Override
-    public int write(byte[] b) throws RemoteException {
+    public int write(int processGroupId, byte[] b) throws RemoteException {
         try {
             os.write(b);
             return b.length;
@@ -96,7 +95,11 @@ public class PipedOutputStreamFileChannelServer extends JinixKernelUnicastRemote
 
     @Override
     public void duplicate() throws RemoteException {
-        System.out.println("Duplicate PSOFCS: "+toString());
         openCount++;
+    }
+
+    @Override
+    public void force(boolean b) throws RemoteException {
+
     }
 }
