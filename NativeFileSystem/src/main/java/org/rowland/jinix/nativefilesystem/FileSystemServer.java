@@ -37,6 +37,8 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
 
     private Map<Integer, List<FileAccessorStatistics>> openFileMap = Collections.synchronizedMap(
             new HashMap<Integer, List<FileAccessorStatistics>>());
+    private List<FileAccessorStatistics> kernelOpenFileList = Collections.synchronizedList(
+            new LinkedList<FileAccessorStatistics>());
 
     FileSystemServer(Path file) throws RemoteException {
         super();
@@ -278,12 +280,20 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
     public RemoteFileAccessor getRemoteFileAccessor(int pid, String name, Set<? extends OpenOption> options)
             throws FileAlreadyExistsException, NoSuchFileException, RemoteException {
         try {
-            FileSystemChannelServer s = new FileSystemChannelServer(this, pid, name, resolveAbsolutePath(name), options);
+
+            FileSystemChannelServer s;
+            if (name.endsWith(".jar")) {
+                s = new JarFileSystemChannelServer(this, pid, name, resolveAbsolutePath(name), options);
+            } else {
+                s = new FileSystemChannelServer(this, pid, name, resolveAbsolutePath(name), options);
+            }
 
             // Only the Jinix Kernel passes pid -1 when it gets the init
             if (pid == -1) {
+                kernelOpenFileList.add(s);
                 return s;
             }
+
             List<FileAccessorStatistics> l = openFileMap.get(pid);
             if (l == null) {
                 l = new LinkedList<FileAccessorStatistics>();
@@ -307,8 +317,14 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
     }
 
     void removeFileSystemChannelServer(int pid, FileSystemChannelServer s) {
+        if (pid == -1) {
+            kernelOpenFileList.remove(s);
+            return;
+        }
         List<FileAccessorStatistics> l = openFileMap.get(pid);
-        l.remove(s);
+        if (l != null) { // In rare cases where the kernel has opened the file, the list will be null.
+            l.remove(s);
+        }
     }
 
     /**

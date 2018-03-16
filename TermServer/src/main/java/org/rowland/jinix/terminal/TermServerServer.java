@@ -12,14 +12,13 @@ import org.rowland.jinix.proc.EventData;
 import org.rowland.jinix.proc.EventNotificationHandler;
 import org.rowland.jinix.proc.ProcessManager;
 
+import java.rmi.NoSuchObjectException;
 import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.registry.Registry;
 import java.rmi.server.RMISocketFactory;
 import java.rmi.server.UnicastRemoteObject;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 
 /**
  * Created by rsmith on 11/28/2016.
@@ -32,8 +31,7 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
     private Terminal[] term;
     private NameSpace rootNamespace;
     ProcessManager processManager;
-
-    Map<PtyMode, Integer> defaultModes = new HashMap<>();
+    private ResumeEventNotificationHandler processManagerEventHandler;
 
     private TermServerServer() throws RemoteException {
 
@@ -59,38 +57,25 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
 
         term = new Terminal[256];
 
+        processManagerEventHandler = new ResumeEventNotificationHandler();
         processManager.registerGlobalEventNotificationHandler(ProcessManager.EventName.RESUME,
-                new ResumeEventNotificationHandler());
-
-
-        setupDefaultPtyModes();
+                processManagerEventHandler);
     }
 
-    private void setupDefaultPtyModes() {
-        defaultModes.put(PtyMode.VINTR, 0x03);
-        defaultModes.put(PtyMode.VQUIT, 0x1c);
-        defaultModes.put(PtyMode.VERASE, 0x7F);
-        defaultModes.put(PtyMode.VKILL, 0x15);
-        defaultModes.put(PtyMode.VEOF, 0x04);
-        defaultModes.put(PtyMode.VSTART, 0x11);
-        defaultModes.put(PtyMode.VSTOP, 0x13);
-        defaultModes.put(PtyMode.VSUSP, 0x1a);
-        defaultModes.put(PtyMode.VREPRINT, 0x12);
-        defaultModes.put(PtyMode.VWERASE, 0x17);
-        defaultModes.put(PtyMode.VLNEXT, 0x16);
-        defaultModes.put(PtyMode.VFLUSH, 0x0f);
-    }
 
     @Override
     public short createTerminal() throws RemoteException {
-        return createTerminal(Collections.emptyMap());
+        return createTerminal(null, null, null, null);
     }
 
     @Override
-    public short createTerminal(Map<PtyMode, Integer> ttyOptions) throws RemoteException {
+    public short createTerminal(Set<InputMode> im, Set<OutputMode> om, Set<LocalMode> lm,
+                                Map<SpecialCharacter, Byte> cc)
+            throws RemoteException {
+
         for (short i = 0; i < 255; i++) {
             if(term[i]==null) {
-                term[i] = new Terminal(server, i, ttyOptions);
+                term[i] = new Terminal(server, i, im, om, lm, cc);
                 return i;
             }
         }
@@ -103,9 +88,9 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
 
         if (term[termId] == null) throw new RuntimeException("TermServer: Attempt to link a process to an unallocated terminal");
         term[termId].setLinkedProcess(pid);
+        term[termId].deRegisterEventNotificationHandler = new DeRegisterEventNotificationHandler();
         processManager.registerEventNotificationHandler(pid, ProcessManager.EventName.DEREGISTER,
-                new DeRegisterEventNotificationHandler());
-
+                term[termId].deRegisterEventNotificationHandler);
     }
 
     @Override
@@ -123,16 +108,48 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
         term[termId].setForegroundProcessGroupId(processGroupId);
     }
 
+    @Override
+    public TerminalAttributes getTerminalAttributes(short termId) throws RemoteException {
+        if (term[termId] == null) {
+            throw new IllegalArgumentException("Unassigned terminal ID: "+termId);
+        }
+
+        TerminalAttributes rtrn = new TerminalAttributes();
+        rtrn.inputModes = term[termId].getInputModes();
+        rtrn.outputModes = term[termId].getOutputModes();
+        rtrn.localModes = term[termId].getLocalModes();
+        rtrn.specialCharacterMap = term[termId].getSpecialCharacters();
+        return rtrn;
+    }
+
+    @Override
+    public void setTerminalAttributes(short termId, TerminalAttributes terminalAttributes) {
+        if (terminalAttributes == null) {
+            return;
+        }
+
+        if (term[termId] == null) {
+            throw new IllegalArgumentException("Unassigned terminal ID: "+termId);
+        }
+
+        term[termId].setInputModes(terminalAttributes.inputModes);
+        term[termId].setOutputModes(terminalAttributes.outputModes);
+        term[termId].setLocalModes(terminalAttributes.localModes);
+        term[termId].setSpecialCharacters(terminalAttributes.specialCharacterMap);
+    }
+
     private void shutdown() {
         for (short i = 0; i < 255; i++) {
             if(term[i] != null) {
                 term[i].close();
             }
         }
+
+        processManagerEventHandler.unexport();
         unexport();
     }
 
-    public class DeRegisterEventNotificationHandler extends UnicastRemoteObject implements EventNotificationHandler {
+    public class DeRegisterEventNotificationHandler extends JinixKernelUnicastRemoteObject implements EventNotificationHandler {
 
         private DeRegisterEventNotificationHandler() throws RemoteException {
             super(0, RMISocketFactory.getSocketFactory(), RMISocketFactory.getSocketFactory());
@@ -156,7 +173,7 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
         }
     }
 
-    public class ResumeEventNotificationHandler extends UnicastRemoteObject implements EventNotificationHandler {
+    public class ResumeEventNotificationHandler extends JinixKernelUnicastRemoteObject implements EventNotificationHandler {
 
         private ResumeEventNotificationHandler() throws RemoteException {
             super(0, RMISocketFactory.getSocketFactory(), RMISocketFactory.getSocketFactory());
@@ -192,6 +209,7 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
                 System.err.println("Translator must be started with settrans");
                 return;
             }
+
             try {
                 server = new TermServerServer();
             } catch (RemoteException e) {

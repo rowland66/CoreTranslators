@@ -29,6 +29,7 @@ public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implemen
         this.type = type;
         this.lineDiscipline = lineDisipline;
         openCount = 1;
+        System.out.println("Opening TFCS("+parentTerminal.getId()+"): open count="+openCount+": "+type);
     }
 
     @Override
@@ -113,7 +114,6 @@ public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implemen
                     }
                 }
             }
-            lineDiscipline.flush();
             return bs.length;
         } catch (IOException e) {
             throw new RemoteException("Internal error", e);
@@ -169,10 +169,16 @@ public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implemen
     @Override
     public synchronized void duplicate() throws RemoteException {
         openCount++;
+        System.out.println("Duplicating TFCS("+parentTerminal.getId()+"): open count="+openCount+": "+type);
     }
 
     @Override
     public void force(boolean b) throws RemoteException {
 
+    }
+
+    @Override
+    public void flush() throws RemoteException {
+        lineDiscipline.flush();
     }
 }

@@ -48,7 +48,7 @@ public class TermBuffer {
 
         if (parentTerminal.activeWriterThreads.get(Thread.currentThread()) != null) {
             Integer processGroupId = parentTerminal.activeWriterThreads.get(Thread.currentThread());
-            if (processGroupId != parentTerminal.foregroundProcessGroupId) {
+            if (parentTerminal.localModes.contains(LocalMode.TOSTOP) && processGroupId != parentTerminal.foregroundProcessGroupId) {
                 throw new TerminalBlockedOperationException();
             }
         }
@@ -113,6 +113,24 @@ public class TermBuffer {
         return false;
     }
 
+    synchronized int kill() {
+        if (mode == mode_value.read) {
+            try {
+                this.wait();
+            } catch (InterruptedException e) {
+                return 0;
+            }
+        }
+
+        if (position > 0) {
+            int rtrnVal = position;
+            position = 0;
+            return rtrnVal;
+        }
+
+        return 0;
+    }
+
     synchronized int get() {
 
         while (mode == mode_value.write || suspended) {
@@ -133,7 +151,8 @@ public class TermBuffer {
             }
         }
 
-        if (this.position == this.limit) {
+        if (this.limit == 0) {
+            flip();
             return -1;
         }
 
@@ -180,7 +199,7 @@ public class TermBuffer {
         return rtrn;
     }
 
-    synchronized void flip() {
+    private synchronized void flip() {
 
         // Once we enter suspend state we should be locked in write mode. This will allow echo characters to be added
         // to the buffer, and for the slave OS to continue writing until the buffer is full
@@ -206,6 +225,22 @@ public class TermBuffer {
         this.position = 0;
 
         this.notifyAll();
+    }
+
+    synchronized void flush() {
+        while (mode == mode_value.read) {
+            try {
+                this.wait();
+            } catch (InterruptedException e) {
+                return ;
+            }
+        }
+
+        if (position == 0) {
+            return;
+        }
+
+        flip();
     }
 
     synchronized int available() {

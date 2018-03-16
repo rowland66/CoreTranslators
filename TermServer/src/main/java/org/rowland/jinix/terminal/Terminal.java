@@ -4,9 +4,7 @@ import org.rowland.jinix.naming.RemoteFileAccessor;
 import org.rowland.jinix.proc.ProcessManager;
 
 import java.rmi.RemoteException;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * A Terminal provides a mechanism for interaction between a Jinix process and a
@@ -19,6 +17,30 @@ import java.util.Map;
  */
 public class Terminal {
 
+    private static final Set<InputMode> DEFAULT_INPUT_MODES =
+            Collections.unmodifiableSet(EnumSet.of(InputMode.ICRNL, InputMode.IXON));
+    private static final Set<OutputMode> DEFAULT_OUTPUT_MODES =
+            Collections.unmodifiableSet(EnumSet.of(OutputMode.ONLCR));
+    private static final Set<LocalMode> DEFAULT_LOCAL_MODES =
+            Collections.unmodifiableSet(EnumSet.of(LocalMode.ECHO, LocalMode.ISIG, LocalMode.ICANON, LocalMode.IEXTEN, LocalMode.TOSTOP));
+
+    private static final EnumMap<SpecialCharacter, Byte> DEFAULT_SPECIAL_CHARACTERS;
+
+    static {
+        Map<SpecialCharacter, Byte> defaultMap = new EnumMap<SpecialCharacter, Byte>(SpecialCharacter.class);
+        defaultMap.put(SpecialCharacter.VINTR, (byte) 0x03);
+        defaultMap.put(SpecialCharacter.VQUIT, (byte) 0x1c);
+        defaultMap.put(SpecialCharacter.VERASE, (byte) 0x7f);
+        defaultMap.put(SpecialCharacter.VKILL, (byte) 0x15);
+        defaultMap.put(SpecialCharacter.VEOF, (byte) 0x04);
+        defaultMap.put(SpecialCharacter.VEOL, (byte) 0x00);
+        defaultMap.put(SpecialCharacter.VSUSP, (byte) 0x1a);
+        defaultMap.put(SpecialCharacter.VSTOP, (byte) 0x13);
+        defaultMap.put(SpecialCharacter.VSTART, (byte) 0x11);
+
+        DEFAULT_SPECIAL_CHARACTERS = new EnumMap<SpecialCharacter, Byte>(defaultMap);
+    }
+
     TermServerServer server;
     short id;
     int linkedProcess;
@@ -29,7 +51,13 @@ public class Terminal {
     Map<Thread, Integer> activeWriterThreads;
     private TermBuffer inputTermBuffer;
     private TermBuffer outputTermBuffer;
-    private Map<PtyMode, Integer> modes;
+    TermServerServer.DeRegisterEventNotificationHandler deRegisterEventNotificationHandler;
+
+    // termios structure data
+    EnumSet<InputMode> inputModes;
+    EnumSet<OutputMode> outputModes;
+    EnumSet<LocalMode> localModes;
+    EnumMap<SpecialCharacter, Byte> specialCharacters;
 
     /**
      * Constructor used by the TermServerServer to create a new Terminal
@@ -37,18 +65,33 @@ public class Terminal {
      * @param terminalId the ID that identifies the terminal
      * @param overridePtyModes a map of PtyModes that will override the terminal defaults
      */
-    Terminal(TermServerServer termServer, short terminalId, Map<PtyMode, Integer> overridePtyModes) {
+    Terminal(TermServerServer termServer, short terminalId,
+             Set<InputMode> im, Set<OutputMode> om, Set<LocalMode> lm,
+             Map<SpecialCharacter, Byte> cc) {
         server = termServer;
         id = terminalId;
         inputTermBuffer = new TermBuffer(this,1024); // output from the running process
         outputTermBuffer = new TermBuffer(this,1024); // input for the running process
         activeReaderThreads = new HashMap<>(16);
         activeWriterThreads = new HashMap<>(16);
-        this.modes = overridePtyModes;
+
+        inputModes = EnumSet.copyOf(im != null ? im : DEFAULT_INPUT_MODES);
+        outputModes = EnumSet.copyOf(om != null ? om : DEFAULT_OUTPUT_MODES);
+        localModes = EnumSet.copyOf(lm != null ? lm : DEFAULT_LOCAL_MODES);
+        specialCharacters = new EnumMap<SpecialCharacter, Byte>(DEFAULT_SPECIAL_CHARACTERS);
+        applySpecialCharacterOverrides(cc);
+
         foregroundProcessGroupId = -1; // Always start with the foreground process group set to -1 to indicate that the terminal is suspended.
         inputTermBuffer.suspendFlow();
 
         System.out.println("Terminal opened:"+id);
+    }
+
+    private void applySpecialCharacterOverrides(Map<SpecialCharacter, Byte> cc) {
+        if (cc == null) return;
+        for (Map.Entry<SpecialCharacter, Byte> entry : cc.entrySet()) {
+            specialCharacters.put(entry.getKey(), entry.getValue());
+        }
     }
 
     /**
@@ -60,7 +103,7 @@ public class Terminal {
      */
     RemoteFileAccessor getMasterTerminalFileDescriptor() throws RemoteException {
         return new TerminalFileChannel(this, "Master",
-                new LineDiscipline(this, inputTermBuffer, outputTermBuffer, modes));
+                new LineDiscipline(this, inputTermBuffer, outputTermBuffer, false));
     }
 
     /**
@@ -72,12 +115,16 @@ public class Terminal {
      */
     RemoteFileAccessor getSlaveTerminalFileDescriptor() throws RemoteException {
         return new TerminalFileChannel(this, "Slave",
-                new LineDiscipline(this, outputTermBuffer, inputTermBuffer, null));
+                new LineDiscipline(this, outputTermBuffer, inputTermBuffer, true));
     }
 
     void close() {
         System.out.println("Terminal closed:"+id);
         outputTermBuffer.reset();
+        if (deRegisterEventNotificationHandler != null) {
+            deRegisterEventNotificationHandler.unexport();
+            deRegisterEventNotificationHandler = null;
+        }
     }
 
     void setLinkedProcess(int pid) {
@@ -90,6 +137,40 @@ public class Terminal {
 
     int getForegroundProcessGroupId() {
         return foregroundProcessGroupId;
+    }
+
+    Set<InputMode> getInputModes() {
+        return EnumSet.copyOf(inputModes);
+    }
+
+    void setInputModes(Set<InputMode> im) {
+        inputModes = EnumSet.copyOf(im);
+    }
+
+    Set<OutputMode> getOutputModes() {
+        return EnumSet.copyOf(outputModes);
+    }
+
+    void setOutputModes(Set<OutputMode> om) {
+        outputModes = EnumSet.copyOf(om);
+    }
+
+    Set<LocalMode> getLocalModes() {
+        return EnumSet.copyOf(localModes);
+    }
+
+    void setLocalModes(Set<LocalMode> lm) {
+        localModes = EnumSet.copyOf(lm);
+    }
+
+    Map<SpecialCharacter, Byte> getSpecialCharacters() {
+        return new EnumMap<SpecialCharacter, Byte>(specialCharacters);
+    }
+
+    void setSpecialCharacters(Map<SpecialCharacter, Byte> cc) {
+        for (Map.Entry<SpecialCharacter, Byte> ccEntry : cc.entrySet()) {
+            specialCharacters.put(ccEntry.getKey(), ccEntry.getValue());
+        }
     }
 
     /**
@@ -170,11 +251,5 @@ public class Terminal {
         return false;
     }
 
-    private Map<PtyMode, Integer> convertRawTtyOptions(Map<Byte, Integer> inputMap) {
-        Map<PtyMode, Integer> outputMap = new HashMap<PtyMode, Integer>(inputMap.size());
-        for(Map.Entry<Byte, Integer> entry : inputMap.entrySet()) {
-            outputMap.put(PtyMode.fromInt(entry.getKey()), entry.getValue());
-        }
-        return outputMap;
-    }
+
 }

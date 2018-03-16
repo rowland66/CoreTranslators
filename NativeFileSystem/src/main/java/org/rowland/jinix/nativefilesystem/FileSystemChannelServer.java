@@ -4,6 +4,7 @@ import org.rowland.jinix.JinixKernelUnicastRemoteObject;
 import org.rowland.jinix.naming.FileAccessorStatistics;
 import org.rowland.jinix.naming.RemoteFileAccessor;
 
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.NonWritableChannelException;
@@ -19,12 +20,12 @@ import java.util.Set;
 public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
         implements RemoteFileAccessor, FileAccessorStatistics {
 
-    private FileSystemServer server;
-    private int pid;
-    private String jinixPath; // the absolute pathname of the Jinix file
-    private Path filePath; // the absolute pathname of the file in the underlying OS
-    private Set<? extends OpenOption> openOptions;
-    private java.nio.channels.FileChannel fc;
+    protected FileSystemServer server;
+    protected int pid;
+    protected String jinixPath; // the absolute pathname of the Jinix file
+    protected Path filePath; // the absolute pathname of the file in the underlying OS
+    protected Set<? extends OpenOption> openOptions;
+    protected java.nio.channels.FileChannel fc;
     private int openCount;
 
     protected FileSystemChannelServer(FileSystemServer server,
@@ -47,6 +48,7 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
             unexport();
             throw e;
         } catch (IOException e) {
+            unexport();
             throw new RemoteException("Internal error", e);
         }
     }
@@ -64,9 +66,13 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
                 return null;
             }
 
-            byte[] rb = new byte[r];
-            System.arraycopy(b, 0, rb, 0, r);
-            return rb;
+            if (r < len) {
+                byte[] rb = new byte[r];
+                System.arraycopy(b, 0, rb, 0, r);
+                return rb;
+            } else {
+                return b;
+            }
         } catch (IOException e) {
             throw new RemoteException("Internal error", e);
         }
@@ -194,5 +200,10 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
     @Override
     public String getAbsolutePathName() throws RemoteException {
         return jinixPath;
+    }
+
+    @Override
+    public void flush() throws RemoteException {
+        // Noop for files.
     }
 }

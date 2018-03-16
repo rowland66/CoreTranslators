@@ -102,4 +102,13 @@ public class PipedOutputStreamFileChannelServer extends JinixKernelUnicastRemote
     public void force(boolean b) throws RemoteException {
 
     }
+
+    @Override
+    public void flush() throws RemoteException {
+        try {
+            os.flush();
+        } catch (IOException e) {
+            throw new RemoteException("Internal error", e);
+        }
+    }
 }
