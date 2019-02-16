@@ -102,7 +102,7 @@ public class Terminal {
      * @throws RemoteException
      */
     RemoteFileAccessor getMasterTerminalFileDescriptor() throws RemoteException {
-        return new TerminalFileChannel(this, "Master",
+        return new TerminalFileChannel(this, TerminalFileChannel.TerminalType.MASTER,
                 new LineDiscipline(this, inputTermBuffer, outputTermBuffer, false));
     }
 
@@ -114,13 +114,14 @@ public class Terminal {
      * @throws RemoteException
      */
     RemoteFileAccessor getSlaveTerminalFileDescriptor() throws RemoteException {
-        return new TerminalFileChannel(this, "Slave",
+        return new TerminalFileChannel(this, TerminalFileChannel.TerminalType.SLAVE,
                 new LineDiscipline(this, outputTermBuffer, inputTermBuffer, true));
     }
 
     void close() {
         System.out.println("Terminal closed:"+id);
         outputTermBuffer.reset();
+        inputTermBuffer.reset();
         if (deRegisterEventNotificationHandler != null) {
             deRegisterEventNotificationHandler.unexport();
             deRegisterEventNotificationHandler = null;

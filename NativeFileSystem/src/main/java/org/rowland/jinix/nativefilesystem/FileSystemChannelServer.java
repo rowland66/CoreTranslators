@@ -1,8 +1,10 @@
 package org.rowland.jinix.nativefilesystem;
 
 import org.rowland.jinix.JinixKernelUnicastRemoteObject;
+import org.rowland.jinix.io.BaseRemoteFileHandleImpl;
 import org.rowland.jinix.naming.FileAccessorStatistics;
 import org.rowland.jinix.naming.RemoteFileAccessor;
+import org.rowland.jinix.naming.RemoteFileHandle;
 
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -58,7 +60,12 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
     }
 
     @Override
-    public byte[] read(int pid, int len) throws RemoteException {
+    public RemoteFileHandle getRemoteFileHandle() throws RemoteException {
+        return new BaseRemoteFileHandleImpl(server, jinixPath);
+    }
+
+    @Override
+    public synchronized byte[] read(int pid, int len) throws RemoteException {
         try {
             byte[] b = new byte[len];
             int r = fc.read(ByteBuffer.wrap(b));
@@ -79,7 +86,7 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
     }
 
     @Override
-    public int write(int pid, byte[] b) throws NonWritableChannelException, RemoteException {
+    public synchronized int write(int pid, byte[] b) throws NonWritableChannelException, RemoteException {
         try {
             return fc.write(ByteBuffer.wrap(b));
         } catch (IOException e) {
@@ -88,7 +95,7 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
     }
 
     @Override
-    public long skip(long n) throws RemoteException {
+    public synchronized long skip(long n) throws RemoteException {
         try {
             return fc.position(fc.position()+n).position();
         } catch (IOException e) {
@@ -97,7 +104,7 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
     }
 
     @Override
-    public int available() throws RemoteException {
+    public synchronized int available() throws RemoteException {
         try {
             return (int) Math.min(fc.size()-fc.position()-1,Integer.MAX_VALUE);
         } catch (IOException e) {
@@ -106,7 +113,7 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
     }
 
     @Override
-    public long getFilePointer() throws RemoteException {
+    public synchronized long getFilePointer() throws RemoteException {
         try {
             return fc.position();
         } catch (IOException e) {
@@ -115,7 +122,7 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
     }
 
     @Override
-    public void seek(long l) throws RemoteException {
+    public synchronized void seek(long l) throws RemoteException {
         try {
             fc.position(l);
         } catch (IOException e) {
@@ -133,7 +140,7 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
     }
 
     @Override
-    public void setLength(long l) throws RemoteException {
+    public synchronized void setLength(long l) throws RemoteException {
         try {
             fc.position(l);
         } catch (IOException e) {
@@ -183,7 +190,7 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
     }
 
     @Override
-    public void force(boolean metaData) throws RemoteException {
+    public synchronized void force(boolean metaData) throws RemoteException {
         try {
             fc.force(metaData);
         } catch (IOException e) {
@@ -200,10 +207,5 @@ public class FileSystemChannelServer extends JinixKernelUnicastRemoteObject
     @Override
     public String getAbsolutePathName() throws RemoteException {
         return jinixPath;
-    }
-
-    @Override
-    public void flush() throws RemoteException {
-        // Noop for files.
     }
 }

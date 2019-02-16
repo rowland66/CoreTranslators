@@ -18,18 +18,27 @@ import java.util.*;
  */
 public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implements RemoteFileAccessor {
 
+    enum TerminalType {MASTER, SLAVE};
+
     private Terminal parentTerminal;
-    private String type;
+    private TerminalType type;
     LineDiscipline lineDiscipline;
     private volatile int openCount;
 
-    TerminalFileChannel(Terminal terminal, String type, LineDiscipline lineDisipline) throws RemoteException {
+    TerminalFileChannel(Terminal terminal, TerminalType type, LineDiscipline lineDisipline) throws RemoteException {
         super();
         this.parentTerminal = terminal;
         this.type = type;
         this.lineDiscipline = lineDisipline;
         openCount = 1;
-        System.out.println("Opening TFCS("+parentTerminal.getId()+"): open count="+openCount+": "+type);
+    }
+
+    @Override
+    /**
+     * Unsupported operation since RemoteFileHandles are only required for servers that support FileSystem
+     */
+    public RemoteFileHandle getRemoteFileHandle() throws RemoteException {
+        throw new UnsupportedOperationException("Terminal file channels do not provide RemoteFileHandles");
     }
 
     @Override
@@ -37,7 +46,7 @@ public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implemen
 
         if (openCount == 0) throw new RemoteException("Illegal attempt to read from a closed TermBuferIS");
 
-        if (type.equals("Slave")) {
+        if (type == TerminalType.SLAVE) {
             parentTerminal.activeReaderThreads.put(Thread.currentThread(), processGroupId);
         }
         try {
@@ -78,7 +87,7 @@ public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implemen
         } catch (IOException e) {
             throw new RemoteException("Internal error", e);
         } finally {
-            if (type.equals("Slave")) {
+            if (type == TerminalType.SLAVE) {
                 parentTerminal.activeReaderThreads.remove(Thread.currentThread());
             }
         }
@@ -88,7 +97,7 @@ public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implemen
     public int write(int processGroupId, byte[] bs) throws RemoteException {
         if (openCount == 0) throw new RemoteException("Illegal attempt to write to a closed TermBuferOS");
 
-        if (type.equals("Slave")) {
+        if (type == TerminalType.SLAVE) {
             parentTerminal.activeWriterThreads.put(Thread.currentThread(), processGroupId);
         }
 
@@ -118,7 +127,7 @@ public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implemen
         } catch (IOException e) {
             throw new RemoteException("Internal error", e);
         } finally {
-            if (type.equals("Slave")) {
+            if (type == TerminalType.SLAVE) {
                 parentTerminal.activeWriterThreads.remove(Thread.currentThread());
             }
         }
@@ -174,11 +183,6 @@ public class TerminalFileChannel extends JinixKernelUnicastRemoteObject implemen
 
     @Override
     public void force(boolean b) throws RemoteException {
-
-    }
-
-    @Override
-    public void flush() throws RemoteException {
         lineDiscipline.flush();
     }
 }

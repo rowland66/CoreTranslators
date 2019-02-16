@@ -2,13 +2,17 @@ package org.rowland.jinix.nativefilesystem;
 
 import org.rowland.jinix.JinixKernelUnicastRemoteObject;
 import org.rowland.jinix.RootFileSystem;
+import org.rowland.jinix.io.BaseRemoteFileHandleImpl;
+import org.rowland.jinix.io.JinixFile;
 import org.rowland.jinix.io.JinixFileDescriptor;
 import org.rowland.jinix.lang.JinixRuntime;
 import org.rowland.jinix.lang.ProcessSignalHandler;
 import org.rowland.jinix.naming.*;
 import org.rowland.jinix.proc.ProcessManager;
 
+import javax.naming.NamingException;
 import java.io.IOException;
+import java.io.Serializable;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.channels.FileChannel;
@@ -33,7 +37,8 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
     private static Thread mainThread;
 
     private Path f;
-    private NameSpace rootNameSpace;
+    private FileNameSpace parent;
+    String attachPointPathWithinParent;
 
     private Map<Integer, List<FileAccessorStatistics>> openFileMap = Collections.synchronizedMap(
             new HashMap<Integer, List<FileAccessorStatistics>>());
@@ -43,31 +48,34 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
     FileSystemServer(Path file) throws RemoteException {
         super();
         this.f = file;
+        this.parent = null;
+        this.attachPointPathWithinParent = "";
     }
 
-    @Override
-    public void setRootNameSpace(NameSpace nameSpace) {
-        this.rootNameSpace = nameSpace;
+    FileSystemServer(Path file, FileNameSpace parent, String attachPointPathWithinParent) throws RemoteException {
+        this(file);
+        this.parent = parent;
+        this.attachPointPathWithinParent = attachPointPathWithinParent;
     }
 
     @Override
     public URI getURI() throws RemoteException {
         try {
-            String path = this.f.toAbsolutePath().toString().replace('\\', '/');
-            if (!path.startsWith("/")) {
-                path = path.substring(path.indexOf('/'),path.length());
+            String parentURIPath = "";
+            if (parent != null) {
+                parentURIPath = parent.getURI().getPath();
             }
-            return new URI("file", null, path, null);
+            return new URI("file", null, parentURIPath+"/"+getPathWithinParent(), null);
         } catch (URISyntaxException e) {
             throw new RemoteException("Unexpected failure creating FileNameSpace URI", e);
         }
     }
 
     @Override
-    public DirectoryFileData getFileAttributes(String name) throws NoSuchFileException, RemoteException {
+    public DirectoryFileData getFileAttributes(String filePathName) throws NoSuchFileException, RemoteException {
         try {
             DirectoryFileData dfd = new DirectoryFileData();
-            Path absoluteFilePath = resolveAbsolutePath(name);
+            Path absoluteFilePath = resolveAbsolutePath(filePathName);
             BasicFileAttributes fa = Files.readAttributes(absoluteFilePath, BasicFileAttributes.class);
             dfd.name = absoluteFilePath.getFileName().toString();
             dfd.length = fa.size();
@@ -75,7 +83,7 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
             dfd.lastModified = fa.lastModifiedTime().toMillis();
             return dfd;
         } catch (InvalidPathException e) {
-            throw new NoSuchFileException(name);
+            throw new NoSuchFileException(filePathName);
         } catch (NoSuchFileException e) {
             throw e;
         } catch (IOException e) {
@@ -84,7 +92,8 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
     }
 
     @Override
-    public void setFileAttributes(String name, DirectoryFileData attributes) throws NoSuchFileException, RemoteException {
+    public void setFileAttributes(String filePathName, DirectoryFileData attributes) throws NoSuchFileException, RemoteException {
+
         long lastModified = attributes.lastModified;
 
         // We only support setting the lastModified time
@@ -93,10 +102,10 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
         }
 
         try {
-            BasicFileAttributeView attrsView = Files.getFileAttributeView(resolveAbsolutePath(name), BasicFileAttributeView.class);
+            BasicFileAttributeView attrsView = Files.getFileAttributeView(resolveAbsolutePath(filePathName), BasicFileAttributeView.class);
             attrsView.setTimes(FileTime.fromMillis(lastModified), null, null);
         } catch (InvalidPathException e) {
-            throw new NoSuchFileException(name);
+            throw new NoSuchFileException(filePathName);
         } catch (NoSuchFileException e) {
             throw e;
         } catch (IOException e) {
@@ -105,180 +114,113 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
     }
 
     @Override
-    public boolean exists(String name) throws RemoteException {
-        try {
-            return Files.exists(resolveAbsolutePath(name));
-        } catch (InvalidPathException e) {
-            return false;
-        }
-    }
-
-    @Override
-    public String[] list(String name) throws RemoteException {
-        try (Stream<Path> dirList = Files.list(resolveAbsolutePath(name))) {
+    public String[] list(String directoryPathName) throws RemoteException {
+        try (Stream<Path> dirList = Files.list(resolveAbsolutePath(directoryPathName))) {
             return dirList.map(Path::getFileName).map(Path::toString).toArray(size -> new String[size]);
         } catch (InvalidPathException e) {
             return new String[0];
+        } catch (NotDirectoryException e) {
+            return null;
         } catch (IOException e) {
-            throw new RemoteException("DirectoryServer: IOException getting directory list for directory: "+name);
+            throw new RemoteException("DirectoryServer: IOException getting directory list for directory: "+directoryPathName);
         }
     }
 
     @Override
-    public DirectoryFileData[] listDirectoryFileData(String name) throws RemoteException {
-
-        try (Stream<Path> dirList = Files.list(resolveAbsolutePath(name))) {
-            int i = 0;
-            List<DirectoryFileData> dirFileDataList = new ArrayList<DirectoryFileData>();
-            for (Path p : dirList.collect(Collectors.toCollection(LinkedList::new))) {
-                DirectoryFileData dfd = new DirectoryFileData();
-                BasicFileAttributes fa = Files.readAttributes(p, BasicFileAttributes.class);
-                dfd.name = p.getFileName().toString();
-                dfd.length = fa.size();
-                dfd.type = (fa.isDirectory() ? DirectoryFileData.FileType.DIRECTORY : DirectoryFileData.FileType.FILE);
-                dfd.lastModified = fa.lastModifiedTime().toMillis();
-                dirFileDataList.add(dfd);
-            }
-            return dirFileDataList.toArray(new DirectoryFileData[dirFileDataList.size()]);
-        } catch (InvalidPathException e) {
-            return new DirectoryFileData[0];
-        } catch (IOException e) {
-            throw new RemoteException("DirectoryServer: IOException getting directory list for directory: "+name);
-        }
-    }
-
-    @Override
-    public boolean createFileAtomically(String name) throws FileAlreadyExistsException, RemoteException {
+    public boolean createFileAtomically(String directoryPathName, String fileName) throws FileAlreadyExistsException, RemoteException {
         try {
-            Files.createFile(resolveAbsolutePath(name));
+            Files.createFile(resolveAbsolutePath(directoryPathName+"/"+fileName));
         } catch (FileAlreadyExistsException e) {
             return false;
         } catch (InvalidPathException e) {
             return false;
         } catch (IOException e) {
-            throw new RemoteException("IOException creating file: "+name);
+            throw new RemoteException("IOException creating file: "+directoryPathName+"/"+fileName);
         }
         return true;
     }
 
     @Override
-    public boolean createDirectory(String name) throws FileAlreadyExistsException, RemoteException {
+    public boolean createDirectory(String parentDirectory, String directoryName) throws FileAlreadyExistsException, RemoteException {
         try {
-            Files.createDirectory(resolveAbsolutePath(name));
+            Files.createDirectory(resolveAbsolutePath(parentDirectory+"/"+directoryName));
         } catch (InvalidPathException e) {
             return false;
         } catch (FileAlreadyExistsException e) {
             return false;
         } catch (IOException e) {
-            throw new RemoteException("IOException creating directory: "+name);
+            throw new RemoteException("IOException creating directory: "+parentDirectory+"/"+directoryName);
         }
         return true;
     }
 
     @Override
-    public boolean createDirectories(String name) throws FileAlreadyExistsException, RemoteException {
+    public void delete(String filePathName) throws NoSuchFileException, DirectoryNotEmptyException, RemoteException {
         try {
-            Files.createDirectories(resolveAbsolutePath(name));
+            Files.delete(resolveAbsolutePath(filePathName));
         } catch (InvalidPathException e) {
-            return false;
-        } catch (FileAlreadyExistsException e) {
-            return false;
-        } catch (IOException e) {
-            throw new RemoteException("IOException creating directories: "+name);
-        }
-        return true;
-    }
-
-    @Override
-    public void delete(String name) throws NoSuchFileException, DirectoryNotEmptyException, RemoteException {
-        try {
-            Files.delete(resolveAbsolutePath(name));
-        } catch (InvalidPathException e) {
-            throw new NoSuchFileException(name);
+            throw new NoSuchFileException(filePathName);
         } catch (NoSuchFileException | DirectoryNotEmptyException e) {
             throw e;
         } catch (IOException e) {
-            throw new RemoteException("IOException deleting file: "+name, e);
+            throw new RemoteException("IOException deleting file: "+filePathName, e);
         }
     }
 
     @Override
-    public void copy(String name, String pathNameTo, CopyOption... options)
+    public void copy(RemoteFileHandle sourceFile, RemoteFileHandle destinationDirectory, String fileName, CopyOption... options)
             throws NoSuchFileException, FileAlreadyExistsException, UnsupportedOperationException, RemoteException {
 
-        if (!pathNameTo.startsWith("/")) {
-            throw new IllegalArgumentException("Copy pathNameTo must begin with slash: "+pathNameTo);
-        }
-
-        LookupResult result = rootNameSpace.lookup(pathNameTo);
-        if (!((FileNameSpace) result.remote).getURI().equals(getURI())) {
-            throw new UnsupportedOperationException();
-        }
-
-        try {
-            if (exists(pathNameTo) &&
-                    getFileAttributes(name).type == DirectoryFileData.FileType.DIRECTORY) {
-                throw new FileAlreadyExistsException(pathNameTo);
+        if (destinationDirectory.getParent().getURI().equals(this.getURI())) {
+            try {
+                Files.copy(resolveAbsolutePath(sourceFile.getPath()), resolveAbsolutePath(destinationDirectory.getPath()).resolve(fileName), options);
+            } catch (NoSuchFileException | FileAlreadyExistsException e) {
+                throw e;
+            } catch (IOException e) {
+                throw new RemoteException("IOException copying file " + sourceFile + " to " + destinationDirectory + "/" + fileName);
             }
-
-            Path dest;
-            if (pathNameTo.equals("/")) {
-                dest = Paths.get(".");
-            } else {
-                pathNameTo = pathNameTo.substring(1);
-                dest = f.resolve(pathNameTo);
+        } else {
+            RemoteFileAccessor sourceFileAccessor = getRemoteFileAccessor(0, sourceFile.getPath(), EnumSet.of(StandardOpenOption.READ));
+            try {
+                RemoteFileAccessor destinationFileAccessor = destinationDirectory.getParent().getRemoteFileAccessor(0,
+                        destinationDirectory.getPath() + "/" + fileName,
+                        EnumSet.of(StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW));
+                try {
+                    byte[] buffer = sourceFileAccessor.read(0, 2048);
+                    while (buffer != null) {
+                        destinationFileAccessor.write(0, buffer);
+                        buffer = sourceFileAccessor.read(0, 2048);
+                    }
+                } finally {
+                    destinationFileAccessor.close();
+                }
+            } finally {
+                sourceFileAccessor.close();
             }
-
-            Files.copy(resolveAbsolutePath(name), dest, options);
-        } catch (InvalidPathException e) {
-            throw new NoSuchFileException(name);
-        } catch (NoSuchFileException | FileAlreadyExistsException e) {
-            throw e;
-        } catch (IOException e) {
-            throw new RemoteException("IOException copying file "+name+" to "+pathNameTo);
         }
     }
 
     @Override
-    public void move(String name, String pathNameTo, CopyOption... options)
-            throws NoSuchFileException, FileAlreadyExistsException, UnsupportedOperationException, RemoteException {
+    public void move(RemoteFileHandle sourceFile, RemoteFileHandle destinationDirectory, String fileName, CopyOption... options)
+            throws DirectoryNotEmptyException, NoSuchFileException, FileAlreadyExistsException, UnsupportedOperationException, RemoteException {
 
-        if (!pathNameTo.startsWith("/")) {
-            throw new IllegalArgumentException("Move pathNameTo must begin with slash: "+pathNameTo);
-        }
-
-        LookupResult result = rootNameSpace.lookup(pathNameTo);
-        if (!((FileNameSpace) result.remote).getURI().equals(getURI())) {
-            throw new UnsupportedOperationException();
-        }
-
-        try {
-            if (exists(pathNameTo) &&
-                    getFileAttributes(name).type == DirectoryFileData.FileType.DIRECTORY) {
-                throw new FileAlreadyExistsException(pathNameTo);
+        if (destinationDirectory.getParent().getURI().equals(this.getURI())) {
+            try {
+                Files.move(resolveAbsolutePath(sourceFile.getPath()), resolveAbsolutePath(destinationDirectory.getPath()).resolve(fileName), options);
+            } catch (NoSuchFileException | FileAlreadyExistsException e) {
+                throw e;
+            } catch (IOException e) {
+                throw new RemoteException("IOException moving file " + sourceFile + " to " + destinationDirectory + "/" + fileName);
             }
-
-            Path dest;
-            if (pathNameTo.equals("/")) {
-                dest = Paths.get(".");
-            } else {
-                pathNameTo = pathNameTo.substring(1);
-                dest = f.resolve(pathNameTo);
-            }
-
-            Files.move(resolveAbsolutePath(name), dest, options);
-        } catch (InvalidPathException e) {
-            throw new NoSuchFileException(name);
-        } catch (NoSuchFileException | FileAlreadyExistsException e) {
-            throw e;
-        } catch (IOException e) {
-            throw new RemoteException("IOException moving file "+name+" to "+pathNameTo);
+        } else {
+            throw new UnsupportedOperationException("Moving between filesystems is not supported");
         }
     }
 
     @Override
     public RemoteFileAccessor getRemoteFileAccessor(int pid, String name, Set<? extends OpenOption> options)
             throws FileAlreadyExistsException, NoSuchFileException, RemoteException {
+
         try {
 
             FileSystemChannelServer s;
@@ -288,7 +230,7 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
                 s = new FileSystemChannelServer(this, pid, name, resolveAbsolutePath(name), options);
             }
 
-            // Only the Jinix Kernel passes pid -1 when it gets the init
+            // Only the Jinix Kernel passes pid -1 when it gets the init jar or when starting a translator
             if (pid == -1) {
                 kernelOpenFileList.add(s);
                 return s;
@@ -307,8 +249,29 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
     }
 
     @Override
-    public Object getKey(String name) throws RemoteException {
-        return name;
+    public RemoteFileAccessor getRemoteFileAccessor(int pid, RemoteFileHandle remoteFileHandle, Set<? extends OpenOption> options) throws FileAlreadyExistsException, NoSuchFileException, RemoteException {
+        return getRemoteFileAccessor(pid, remoteFileHandle.getPath(), options);
+    }
+
+    @Override
+    public Object lookup(int pid, String path) {
+        if (Paths.get(path).normalize().startsWith(Paths.get(".."))) {
+            return null;
+        }
+        if (Files.exists(f.resolve(path.substring(1)), LinkOption.NOFOLLOW_LINKS)) {
+            return new BaseRemoteFileHandleImpl(this, path);
+        }
+        return null;
+    }
+
+    @Override
+    public FileNameSpace getParent() throws RemoteException {
+        return parent;
+    }
+
+    @Override
+    public String getPathWithinParent() throws RemoteException {
+        return attachPointPathWithinParent;
     }
 
     @Override
@@ -345,9 +308,9 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
 
     public static void main(String[] args) {
 
-        JinixFileDescriptor fd = JinixRuntime.getRuntime().getTranslatorFile();
+        JinixFile translatorFile = JinixRuntime.getRuntime().getTranslatorFile();
 
-        if (fd == null) {
+        if (translatorFile == null) {
             System.err.println("Translator must be started with settrans");
             return;
         }
@@ -361,7 +324,10 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
         }
 
         try {
-            server = new FileSystemServer(Paths.get(rootPath));
+            RemoteFileHandle file = (RemoteFileHandle) (new JinixContext()).lookup(translatorFile.getAbsolutePath());
+            server = new FileSystemServer(Paths.get(rootPath), file.getParent(), file.getPath());
+        } catch (NamingException e) {
+            throw new RuntimeException("Internal error", e);
         } catch (RemoteException e) {
             throw new RuntimeException("Internal error", e);
         }
@@ -391,6 +357,16 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
 
     }
 
+    @Override
+    public void shutdown() {
+
+    }
+
+    @Override
+    public void sync() {
+
+    }
+
     public static FileNameSpace runAsRootFileSystem(String[] args) {
         String rootPath;
         if (args == null || args.length == 0 || args[0].isEmpty()) {
@@ -398,10 +374,13 @@ public class FileSystemServer extends JinixKernelUnicastRemoteObject implements 
         } else {
             rootPath = args[0];
         }
+
         try {
             return new FileSystemServer(Paths.get(rootPath));
         } catch (RemoteException e) {
             throw new RuntimeException("Internal error", e);
         }
     }
+
+
 }

@@ -1,6 +1,7 @@
 package org.rowland.jinix.fifo;
 
 import org.rowland.jinix.JinixKernelUnicastRemoteObject;
+import org.rowland.jinix.io.JinixFile;
 import org.rowland.jinix.io.JinixFileDescriptor;
 import org.rowland.jinix.lang.JinixRuntime;
 import org.rowland.jinix.lang.ProcessSignalHandler;
@@ -19,11 +20,9 @@ public class FifoServerServer extends JinixKernelUnicastRemoteObject implements 
 
     private static FifoServerServer server;
     private static Thread mainThread;
-    private NameSpace ns;
 
     private FifoServerServer() throws RemoteException {
         super();
-        ns = JinixRuntime.getRuntime().getRootNamespace();
     }
 
     @Override
@@ -45,9 +44,9 @@ public class FifoServerServer extends JinixKernelUnicastRemoteObject implements 
 
     public static void main(String[] args) {
 
-        JinixFileDescriptor fd = JinixRuntime.getRuntime().getTranslatorFile();
+        JinixFile translatorFile = JinixRuntime.getRuntime().getTranslatorFile();
 
-        if (fd == null) {
+        if (translatorFile == null) {
             System.err.println("Translator must be started with settrans");
             return;
         }

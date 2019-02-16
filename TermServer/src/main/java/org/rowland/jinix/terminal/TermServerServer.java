@@ -36,14 +36,9 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
     private TermServerServer() throws RemoteException {
 
         super();
-        rootNamespace = JinixRuntime.getRuntime().getRootNamespace();
 
         while (true) {
-            try {
-                processManager = (ProcessManager) rootNamespace.lookup(ProcessManager.SERVER_NAME).remote;
-            } catch (RemoteException e) {
-                System.err.println("Term: Failed to locate process manager at " + ProcessManager.SERVER_NAME);
-            }
+            processManager = (ProcessManager) JinixRuntime.getRuntime().lookup(ProcessManager.SERVER_NAME);
             if (processManager == null) {
                 try {
                     Thread.sleep(500);
@@ -203,9 +198,9 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
 
     public static void main(String[] args) {
 
-            JinixFileDescriptor fd = JinixRuntime.getRuntime().getTranslatorFile();
+            JinixFile translatorFile = JinixRuntime.getRuntime().getTranslatorFile();
 
-            if (fd == null) {
+            if (translatorFile == null) {
                 System.err.println("Translator must be started with settrans");
                 return;
             }
