@@ -111,7 +111,7 @@ public class PipedInputStreamFileChannelServer extends JinixKernelUnicastRemoteO
     }
 
     @Override
-    public void flush() throws RemoteException {
-        // Noop for InputStreams
+    public RemoteFileHandle getRemoteFileHandle() throws RemoteException {
+        return null;
     }
 }

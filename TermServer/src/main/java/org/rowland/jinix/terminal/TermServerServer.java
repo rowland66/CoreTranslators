@@ -104,6 +104,11 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
     }
 
     @Override
+    public int getTerminalForegroundProcessGroup(short termId) throws RemoteException {
+        return term[termId].getForegroundProcessGroupId();
+    }
+
+    @Override
     public TerminalAttributes getTerminalAttributes(short termId) throws RemoteException {
         if (term[termId] == null) {
             throw new IllegalArgumentException("Unassigned terminal ID: "+termId);
@@ -131,6 +136,22 @@ class TermServerServer extends JinixKernelUnicastRemoteObject implements TermSer
         term[termId].setOutputModes(terminalAttributes.outputModes);
         term[termId].setLocalModes(terminalAttributes.localModes);
         term[termId].setSpecialCharacters(terminalAttributes.specialCharacterMap);
+    }
+
+    @Override
+    public void setTerminalSize(short termId, int columns, int lines) throws RemoteException {
+        term[termId].columns = columns;
+        term[termId].lines = lines;
+    }
+
+    @Override
+    public int getTerminalColumns(short termId) throws RemoteException {
+        return term[termId].columns;
+    }
+
+    @Override
+    public int getTerminalLines(short termId) throws RemoteException {
+        return term[termId].lines;
     }
 
     private void shutdown() {

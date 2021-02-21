@@ -59,6 +59,9 @@ public class Terminal {
     EnumSet<LocalMode> localModes;
     EnumMap<SpecialCharacter, Byte> specialCharacters;
 
+    int columns;
+    int lines;
+
     /**
      * Constructor used by the TermServerServer to create a new Terminal
      *

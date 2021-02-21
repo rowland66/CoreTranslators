@@ -1,6 +1,7 @@
 package org.rowland.jinix.fifo;
 
 import org.rowland.jinix.JinixKernelUnicastRemoteObject;
+import org.rowland.jinix.io.BaseRemoteFileHandleImpl;
 import org.rowland.jinix.naming.*;
 
 import java.io.IOException;
@@ -104,11 +105,7 @@ public class PipedOutputStreamFileChannelServer extends JinixKernelUnicastRemote
     }
 
     @Override
-    public void flush() throws RemoteException {
-        try {
-            os.flush();
-        } catch (IOException e) {
-            throw new RemoteException("Internal error", e);
-        }
+    public RemoteFileHandle getRemoteFileHandle() throws RemoteException {
+        return null;
     }
 }
