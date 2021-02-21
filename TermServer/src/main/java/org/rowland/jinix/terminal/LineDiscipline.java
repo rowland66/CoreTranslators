@@ -90,12 +90,15 @@ public class LineDiscipline {
     }
 
     protected void handleOutputCR() throws IOException {
-        if (parentTerminal.inputModes.contains(InputMode.ICRNL)) {
-            writeRawOutput('\n');   // Map CR to NL on input
-            this.outputBuffer.flush();
-        } else if (parentTerminal.inputModes.contains(InputMode.IGNCR)) {
+        if (parentTerminal.inputModes.contains(InputMode.IGNCR)) {
             return;    // Ignore CR on input
         }
+        if (parentTerminal.inputModes.contains(InputMode.ICRNL)) {
+            writeRawOutput('\n');   // Map CR to NL on input
+        } else {
+            writeRawOutput('\r');
+        }
+        this.outputBuffer.flush();
     }
 
     protected void handleOutputLF() throws IOException {
